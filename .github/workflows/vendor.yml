@@ -56,7 +56,6 @@ jobs:
           archive="kubecomps-${KUBECOMPS_VERSION}-ansible-vendor.tar.gz"
 
           find vendor -type d -exec chmod 755 {} +
-          find vendor -type f -exec chmod 644 {} +
           tar \
             --format=gnu \
             --sort=name \
