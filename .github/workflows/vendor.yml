@@ -1,0 +1,99 @@
+name: Kubecomps Ansible Vendor Generator
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+env:
+  KUBECOMPS_VERSION: "4.0.3"
+  KUBESPRAY_COMMIT: "8a7b396dee45f69659941e3ef5f26218c348d251"
+  KUBESPRAY_2_17_0_COMMIT: "205e54c1111f7fa4deb87a3e67e5f0adc66acbfc"
+  KUBESPRAY_2_19_1_COMMIT: "1c954d828efe16c07caeb4c585f3d78c14310897"
+
+permissions:
+  contents: write
+
+jobs:
+  generate-vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download pinned submodules
+        run: |
+          set -euo pipefail
+          mkdir -p vendor/manifests/ansible
+
+          fetch_submodule() {
+            local name="$1"
+            local commit="$2"
+            local archive="${name}.tar.gz"
+            local unpack="unpack-${name}"
+
+            curl --fail --location --retry 3 \
+              "https://github.com/zexi/kubespray/archive/${commit}.tar.gz" \
+              --output "${archive}"
+            mkdir "${unpack}"
+            tar -xzf "${archive}" -C "${unpack}" --strip-components=1
+            mv "${unpack}" "vendor/manifests/ansible/${name}"
+          }
+
+          fetch_submodule kubespray "${KUBESPRAY_COMMIT}"
+          fetch_submodule kubespray_2_17_0 "${KUBESPRAY_2_17_0_COMMIT}"
+          fetch_submodule kubespray_2_19_1 "${KUBESPRAY_2_19_1_COMMIT}"
+
+          test -f vendor/manifests/ansible/kubespray/ansible_version.yml
+          test -f vendor/manifests/ansible/kubespray_2_17_0/ansible_version.yml
+          test -f vendor/manifests/ansible/kubespray_2_19_1/ansible_version.yml
+
+      - name: Create deterministic vendor archive
+        id: package
+        run: |
+          set -euo pipefail
+          archive="kubecomps-${KUBECOMPS_VERSION}-ansible-vendor.tar.gz"
+
+          find vendor -type d -exec chmod 755 {} +
+          find vendor -type f -exec chmod 644 {} +
+          tar \
+            --format=gnu \
+            --sort=name \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --mtime='@0' \
+            -czf "${archive}" \
+            -C vendor manifests
+          sha256sum "${archive}" > "${archive}.sha256"
+
+          echo "ARCHIVE=${archive}" >> "${GITHUB_OUTPUT}"
+          echo "VERSION=${KUBECOMPS_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubecomps-ansible-vendor
+          path: |
+            ${{ steps.package.outputs.ARCHIVE }}
+            ${{ steps.package.outputs.ARCHIVE }}.sha256
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v${{ steps.package.outputs.VERSION }}"
+          archive="${{ steps.package.outputs.ARCHIVE }}"
+          notes="Deterministic archive of the three Kubespray submodules pinned by yunionio/kubecomps ${tag}."
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" \
+              "${archive}" "${archive}.sha256" --clobber
+          else
+            gh release create "${tag}" \
+              "${archive}" "${archive}.sha256" \
+              --title "Kubecomps ${tag} Ansible vendor" \
+              --notes "${notes}"
+          fi
